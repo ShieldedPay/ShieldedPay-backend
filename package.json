@@ -1,0 +1,25 @@
+{
+  "name": "shieldedpay-backend",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "eslint .",
+    "db:migrate": "psql \"$DATABASE_URL\" -f scripts/001-create-tables.sql",
+    "db:seed": "psql \"$DATABASE_URL\" -f scripts/002-seed-demo-data.sql"
+  },
+  "dependencies": {
+    "@neondatabase/serverless": "^1.0.2",
+    "next": "16.2.0",
+    "react": "19.2.4",
+    "react-dom": "19.2.4"
+  },
+  "devDependencies": {
+    "@types/node": "^22",
+    "@types/react": "19.2.14",
+    "@types/react-dom": "19.2.3",
+    "typescript": "5.7.3"
+  }
+}
