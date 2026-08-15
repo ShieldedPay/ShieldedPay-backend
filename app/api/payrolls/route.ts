@@ -71,7 +71,7 @@ export async function POST(request: NextRequest): Promise<NextResponse<ApiRespon
     }
 
     // Calculate total
-    const totalUsd = employees.reduce((sum: number, emp: { salary_usd: number }) => sum + Number(emp.salary_usd), 0)
+    const totalUsd = employees.reduce((sum: number, emp: Record<string, any>) => sum + Number(emp.salary_usd), 0)
 
     // Create payroll
     const payrollResult = await sql`

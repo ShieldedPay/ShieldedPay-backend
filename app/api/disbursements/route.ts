@@ -25,7 +25,7 @@ export async function GET(): Promise<NextResponse<ApiResponse<DisbursementWithEm
       LIMIT 100
     `
 
-    const result: DisbursementWithEmployee[] = disbursements.map((d: { name_encrypted: string; employee_country: string } & Record<string, unknown>) => ({
+    const result: DisbursementWithEmployee[] = disbursements.map((d: Record<string, any>) => ({
       id: d.id as string,
       payroll_id: d.payroll_id as string,
       employee_id: d.employee_id as string,

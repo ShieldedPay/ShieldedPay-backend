@@ -21,7 +21,7 @@ export async function GET(): Promise<NextResponse<ApiResponse<EmployeeWithDecryp
       ORDER BY created_at DESC
     `
 
-    const decryptedEmployees: EmployeeWithDecryptedName[] = employees.map((emp: Employee) => ({
+    const decryptedEmployees: EmployeeWithDecryptedName[] = employees.map((emp: Record<string, any>) => ({
       id: emp.id,
       org_id: emp.org_id,
       external_id: emp.external_id,
@@ -75,9 +75,20 @@ export async function POST(request: NextRequest): Promise<NextResponse<ApiRespon
       RETURNING id, org_id, external_id, email_hash, name_encrypted, salary_usd, currency, country, status, stellar_address, created_at, updated_at
     `
 
+    const row = result[0]
     const employee: EmployeeWithDecryptedName = {
-      ...result[0],
-      name: decryptName(result[0].name_encrypted),
+      id: row.id,
+      org_id: row.org_id,
+      external_id: row.external_id,
+      email_hash: row.email_hash,
+      name: decryptName(row.name_encrypted),
+      salary_usd: row.salary_usd,
+      currency: row.currency,
+      country: row.country,
+      status: row.status,
+      stellar_address: row.stellar_address,
+      created_at: row.created_at,
+      updated_at: row.updated_at,
     }
 
     return NextResponse.json({ success: true, data: employee }, { status: 201 })
