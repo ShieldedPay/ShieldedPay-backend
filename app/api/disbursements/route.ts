@@ -1,16 +1,20 @@
-import { NextResponse } from "next/server"
-import { sql } from "@/lib/db"
-import { decryptName } from "@/lib/crypto"
-import type { DisbursementWithEmployee, ApiResponse } from "@/lib/types"
+import { NextResponse } from "next/server";
+import { sql, isDbConnected, mockDb } from "@/lib/db";
+import { decryptName } from "@/lib/crypto";
+import type { DisbursementWithEmployee, ApiResponse } from "@/lib/types";
 
 export async function GET(): Promise<NextResponse<ApiResponse<DisbursementWithEmployee[]>>> {
   try {
-    // Get demo org ID
-    const orgs = await sql`SELECT id FROM organizations LIMIT 1`
-    if (orgs.length === 0) {
-      return NextResponse.json({ success: false, error: "No organization found" }, { status: 404 })
+    if (!isDbConnected()) {
+      return NextResponse.json({ success: true, data: mockDb.disbursements as any });
     }
-    const orgId = orgs[0].id
+
+    // Get demo org ID
+    const orgs = await sql`SELECT id FROM organizations LIMIT 1`;
+    if (orgs.length === 0) {
+      return NextResponse.json({ success: false, error: "No organization found" }, { status: 404 });
+    }
+    const orgId = orgs[0].id;
 
     const disbursements = await sql`
       SELECT 
@@ -23,7 +27,7 @@ export async function GET(): Promise<NextResponse<ApiResponse<DisbursementWithEm
       WHERE p.org_id = ${orgId}
       ORDER BY d.created_at DESC
       LIMIT 100
-    `
+    `;
 
     const result: DisbursementWithEmployee[] = disbursements.map((d: Record<string, any>) => ({
       id: d.id as string,
@@ -41,14 +45,14 @@ export async function GET(): Promise<NextResponse<ApiResponse<DisbursementWithEm
       created_at: d.created_at as string,
       employee_name: decryptName(d.name_encrypted),
       employee_country: d.employee_country,
-    }))
+    }));
 
-    return NextResponse.json({ success: true, data: result })
+    return NextResponse.json({ success: true, data: result });
   } catch (error) {
-    console.error("Disbursements fetch error:", error)
+    console.error("Disbursements fetch error:", error);
     return NextResponse.json(
       { success: false, error: "Failed to fetch disbursements" },
       { status: 500 }
-    )
+    );
   }
 }

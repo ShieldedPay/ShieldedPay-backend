@@ -1,16 +1,22 @@
-import { NextRequest, NextResponse } from "next/server"
-import { sql } from "@/lib/db"
-import { generateCommitment, generateSecret, generateClaimToken, generateMerkleRoot, usdToXlm } from "@/lib/crypto"
-import type { Payroll, ApiResponse } from "@/lib/types"
+import { NextRequest, NextResponse } from "next/server";
+import { sql, isDbConnected, mockDb } from "@/lib/db";
+import { usdToXlm } from "@/lib/crypto";
+import { buildMerkleTree, computeDisbursementLeaf } from "@/services/merkle";
+import { issueVoucherToken } from "@/services/voucher";
+import { createPayrollSchema, handleValidationError } from "@/lib/validation";
+import type { Payroll, ApiResponse } from "@/lib/types";
 
 export async function GET(): Promise<NextResponse<ApiResponse<Payroll[]>>> {
   try {
-    // Get demo org ID
-    const orgs = await sql`SELECT id FROM organizations LIMIT 1`
-    if (orgs.length === 0) {
-      return NextResponse.json({ success: false, error: "No organization found" }, { status: 404 })
+    if (!isDbConnected()) {
+      return NextResponse.json({ success: true, data: mockDb.payrolls as Payroll[] });
     }
-    const orgId = orgs[0].id
+
+    const orgs = await sql`SELECT id FROM organizations LIMIT 1`;
+    if (orgs.length === 0) {
+      return NextResponse.json({ success: false, error: "No organization found" }, { status: 404 });
+    }
+    const orgId = orgs[0].id;
 
     const payrolls = await sql`
       SELECT id, org_id, period_start, period_end, status, total_usd, 
@@ -18,103 +24,107 @@ export async function GET(): Promise<NextResponse<ApiResponse<Payroll[]>>> {
       FROM payrolls
       WHERE org_id = ${orgId}
       ORDER BY created_at DESC
-    `
+    `;
 
-    return NextResponse.json({ success: true, data: payrolls as Payroll[] })
+    return NextResponse.json({ success: true, data: payrolls as Payroll[] });
   } catch (error) {
-    console.error("Payrolls fetch error:", error)
+    console.error("Payrolls fetch error:", error);
     return NextResponse.json(
       { success: false, error: "Failed to fetch payrolls" },
       { status: 500 }
-    )
+    );
   }
 }
 
-export async function POST(request: NextRequest): Promise<NextResponse<ApiResponse<Payroll>>> {
+export async function POST(request: NextRequest): Promise<NextResponse<any>> {
   try {
-    const body = await request.json()
-    const { period_start, period_end, employee_ids } = body
+    const rawBody = await request.json();
+    const validation = createPayrollSchema.safeParse(rawBody);
 
-    if (!period_start || !period_end) {
-      return NextResponse.json(
-        { success: false, error: "Missing required fields" },
-        { status: 400 }
-      )
+    if (!validation.success) {
+      return handleValidationError(validation.error);
     }
 
-    // Get demo org ID
-    const orgs = await sql`SELECT id FROM organizations LIMIT 1`
-    if (orgs.length === 0) {
-      return NextResponse.json({ success: false, error: "No organization found" }, { status: 404 })
-    }
-    const orgId = orgs[0].id
+    const { organization_id, period, employees, token_address, expiration_days } = validation.data;
+    const token = token_address || "native_xlm";
 
-    // Get active employees (or specific ones if provided)
-    let employees
-    if (employee_ids && employee_ids.length > 0) {
-      employees = await sql`
-        SELECT id, salary_usd FROM employees 
-        WHERE org_id = ${orgId} AND id = ANY(${employee_ids}) AND status = 'active'
-      `
-    } else {
-      employees = await sql`
-        SELECT id, salary_usd FROM employees 
-        WHERE org_id = ${orgId} AND status = 'active'
-      `
-    }
+    // 1. Build leaves and Merkle tree using domain separation (0x00 leaf, 0x01 branch)
+    const leaves: string[] = [];
+    const disbursementItems: any[] = [];
+    const now = new Date();
+    const expiresAt = Math.floor(now.getTime() / 1000) + expiration_days * 86400;
 
-    if (employees.length === 0) {
-      return NextResponse.json(
-        { success: false, error: "No active employees found" },
-        { status: 400 }
-      )
-    }
+    employees.forEach((emp, index) => {
+      const salt = Buffer.from(Array.from({ length: 32 }, () => Math.floor(Math.random() * 256))).toString("hex");
+      const recipient = emp.wallet_address || `did:stellar:emp_${index}_${emp.email}`;
+      const leaf = computeDisbursementLeaf(recipient, emp.amount_usd, token, salt);
+      leaves.push(leaf);
 
-    // Calculate total
-    const totalUsd = employees.reduce((sum: number, emp: Record<string, any>) => sum + Number(emp.salary_usd), 0)
+      const voucherToken = issueVoucherToken({
+        batch_id: `batch_${Date.now()}`,
+        employee_index: index,
+        amount: emp.amount_usd,
+        currency: emp.local_currency || "USD",
+        expires_at: expiresAt,
+      });
 
-    // Create payroll
-    const payrollResult = await sql`
-      INSERT INTO payrolls (org_id, period_start, period_end, status, total_usd, employee_count)
-      VALUES (${orgId}, ${period_start}, ${period_end}, 'draft', ${totalUsd}, ${employees.length})
-      RETURNING id, org_id, period_start, period_end, status, total_usd, employee_count, merkle_root, created_at, processed_at
-    `
+      disbursementItems.push({
+        recipient,
+        amount_usd: emp.amount_usd,
+        amount_xlm: usdToXlm(emp.amount_usd),
+        salt,
+        leaf,
+        voucher_token: voucherToken,
+        currency: emp.local_currency || "USD",
+      });
+    });
 
-    const payroll = payrollResult[0]
+    const { root: merkleRoot, proofs } = buildMerkleTree(leaves);
+    const totalAmount = employees.reduce((sum, e) => sum + e.amount_usd, 0);
+    const payrollId = `pr_${Date.now()}`;
 
-    // Create disbursements for each employee
-    const commitments: string[] = []
-    for (const emp of employees) {
-      const secret = generateSecret()
-      const commitment = generateCommitment(secret, emp.salary_usd, emp.id)
-      const claimToken = generateClaimToken()
-      const amountXlm = usdToXlm(emp.salary_usd)
+    const payrollRecord = {
+      id: payrollId,
+      organization_id,
+      period,
+      status: "committed",
+      total_amount: totalAmount,
+      employee_count: employees.length,
+      merkle_root: merkleRoot,
+      created_at: now.toISOString(),
+      processed_at: now.toISOString(),
+      expiration_timestamp: expiresAt,
+    };
 
-      commitments.push(commitment)
-
+    if (isDbConnected()) {
       await sql`
-        INSERT INTO disbursements (payroll_id, employee_id, amount_usd, amount_xlm, status, commitment_hash, claim_token)
-        VALUES (${payroll.id}, ${emp.id}, ${emp.salary_usd}, ${amountXlm}, 'pending', ${commitment}, ${claimToken})
-      `
+        INSERT INTO payrolls (id, organization_id, period, status, total_amount, employee_count, merkle_root)
+        VALUES (${payrollId}, ${organization_id}, ${period}, 'committed', ${totalAmount}, ${employees.length}, ${merkleRoot})
+      `;
+    } else {
+      mockDb.payrolls.unshift(payrollRecord);
     }
 
-    // Generate merkle root
-    const merkleRoot = generateMerkleRoot(commitments)
-
-    // Update payroll with merkle root
-    await sql`
-      UPDATE payrolls SET merkle_root = ${merkleRoot} WHERE id = ${payroll.id}
-    `
-
-    return NextResponse.json({ 
-      success: true, 
-      data: { ...payroll, merkle_root: merkleRoot } as Payroll 
-    }, { status: 201 })
-  } catch (error) {
-    console.error("Payroll create error:", error)
     return NextResponse.json(
-      { success: false, error: "Failed to create payroll" },
+      {
+        success: true,
+        data: {
+          payroll: payrollRecord,
+          merkle_root: merkleRoot,
+          disbursements: disbursementItems.map((d, i) => ({
+            ...d,
+            proof: proofs[i],
+            leaf_index: i,
+          })),
+        },
+      },
+      { status: 201 }
+    );
+  } catch (error: any) {
+    console.error("Payroll create error:", error);
+    return NextResponse.json(
+      { success: false, error: error.message || "Failed to create payroll batch" },
       { status: 500 }
-    )
+    );
   }
 }
